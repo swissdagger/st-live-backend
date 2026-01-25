@@ -25,7 +25,7 @@ load_dotenv()
 # --- Configuration ---
 # Uses the shared URL from your frontend config
 SUPABASE_URL = os.getenv("VITE_SUPABASE_URL") 
-
+SUMTYME_KEY = os.getenv("SUMTYME_API_KEY")
 # Uses the SECURE key (Recommended: SUPABASE_SERVICE_ROLE_KEY)
 # Falls back to VITE_ keys if necessary, but warns about it.
 SUPABASE_KEY = (
@@ -74,7 +74,7 @@ def initialize_clients():
     if SUMTYME_AVAILABLE and eip_client is None:
         try:
             # Initialize client with API key
-            eip_client = EIPClient(apikey='stai-pFfEN6MmntY5QqoPjK6vQhwCiJgw-kjDL67TDNUGbAnf')
+            eip_client = EIPClient(apikey=SUMTYME_KEY)
             logger.info("✅ EIP Client initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize EIP Client: {e}")
