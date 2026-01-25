@@ -10,24 +10,22 @@ pandas==2.2.2
 numpy==2.0.2
 
 # HTTP and CORS
-httpx==0.27.2
+# MODIFIED: Removed version pin to resolve conflict with supabase
+httpx
 python-multipart==0.0.20
 
-# Pydantic for data validation - DOWNGRADED for Python 3.14 compatibility
+# Pydantic
 pydantic==2.9.2
 pydantic-settings==2.6.1
 
 # Sumtyme AI Package
-# Note: Requires valid API key from sumtyme.ai
 sumtyme==1.2.3
 
-# Optional: For development
+# Database & Scheduling (Added)
+supabase
+APScheduler
+
+# Optional
 python-dotenv==1.0.1
-
-# Optional: For testing
 pytest==8.3.4
-
 pytest-asyncio==0.24.0
-
-APScheduler==3.10.4
-supabase==2.4.0
