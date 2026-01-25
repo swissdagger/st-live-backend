@@ -371,8 +371,113 @@ async def trigger_manual_forecast(symbol: str, interval: str):
     asyncio.create_task(run_prediction_task(symbol, interval))
     return {"status": "Task started", "symbol": symbol, "interval": interval}
 
+# --- New Helper: Merge DB Predictions with Binance Prices ---
+
+async def get_predictions_with_prices(symbol: str, interval: str, limit: int = 100):
+    """
+    Fetches predictions from Supabase and merges them with Open prices from Binance.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database connection not available")
+
+    # 1. Fetch recent predictions from Supabase
+    # We order by datetime desc to get the latest ones
+    try:
+        response = supabase.table("predictions")\
+            .select("*")\
+            .eq("timeframe", interval)\
+            .order("datetime", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        db_predictions = response.data
+        if not db_predictions:
+            return []
+            
+        # Reverse to chronological order (Oldest -> Newest) for processing
+        db_predictions.reverse()
+        
+    except Exception as e:
+        logger.error(f"Supabase fetch error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    # 2. Determine Time Range for Binance Data
+    # Parse the first and last timestamps from the DB records
+    # DB format example: "2024-01-01 12:00:00"
+    try:
+        first_time_str = db_predictions[0]['datetime']
+        last_time_str = db_predictions[-1]['datetime']
+        
+        # Convert to milliseconds for Binance API
+        fmt = "%Y-%m-%d %H:%M:%S"
+        start_ts = int(datetime.strptime(first_time_str, fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        end_ts = int(datetime.strptime(last_time_str, fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        
+        # Add a buffer to end_ts to ensure we cover the last candle
+        # (Binance fetches by open time)
+        end_ts += 60000 * 60 * 24 # Add adequate buffer or handle logic in fetcher
+        
+    except ValueError as e:
+        logger.error(f"Date parsing error: {e}")
+        # Fallback: Just return DB data without prices if parsing fails
+        return db_predictions
+
+    # 3. Fetch Binance Data (Open Prices)
+    # We use the existing robust fetcher
+    klines = await fetch_binance_data(symbol, interval, start_time=start_ts, end_time=end_ts)
+    
+    # Create a lookup dictionary: { timestamp_ms: open_price }
+    # Kline index 0 is Open Time, index 1 is Open Price
+    price_map = {item[0]: float(item[1]) for item in klines}
+
+    # 4. Merge Data
+    merged_results = []
+    for pred in db_predictions:
+        pred_time_str = pred['datetime']
+        
+        # Convert DB time to ms to match lookup
+        try:
+            p_ts = int(datetime.strptime(pred_time_str, fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
+            
+            # Find matching price
+            # We look for exact match or nearest available candle
+            if p_ts in price_map:
+                pred['open_price'] = price_map[p_ts]
+                merged_results.append(pred)
+            else:
+                # Optional: Handle missing price (e.g., skip or leave as None)
+                # pred['open_price'] = None 
+                # merged_results.append(pred)
+                pass
+                
+        except Exception as e:
+            continue
+
+    return merged_results
+
+# --- New Endpoint ---
+
+@app.get("/api/predictions/with-price")
+async def get_enriched_predictions(
+    symbol: str = "BTCUSDT",  # Default to BTCUSDT as per your config
+    interval: str = Query(..., regex="^(1m|3m|5m|15m|30m|1h|2h|4h|8h|12h|1d)$"),
+    limit: int = 100
+):
+    """
+    Returns predictions enriched with the Open price from Binance.
+    Useful for plotting historical indicators on the chart.
+    """
+    data = await get_predictions_with_prices(symbol, interval, limit)
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "count": len(data),
+        "data": data
+    }
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 
