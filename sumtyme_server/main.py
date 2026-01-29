@@ -251,16 +251,24 @@ async def run_prediction_task(symbol: str, interval: str):
             logger.info(f"✅ Forecast result for {task_id}: {causal_chain} at {timestamp_str}")
             
             if supabase:
-                # MODIFIED: Removed 'timeframe_label' to avoid schema error.
-                # Since we only track BTCUSDT now, single-tenant schema is sufficient.
+                # Find the open price for the prediction timestamp
+                match = df[df['datetime'] == timestamp_str]
+                open_price = None
+                if not match.empty:
+                    open_price = float(match.iloc[0]['open'])
+
                 payload = {
                     "timeframe": interval,
                     "datetime": timestamp_str,
                     "value": causal_chain,
-                    "created_at": datetime.now(timezone.utc).isoformat()
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "open_price": open_price,
+                    "ticker": symbol
                 }
                 
-                res = supabase.table("predictions").insert(payload).execute()
+                # Using upsert based on composite key constraint (timeframe, datetime, ticker)
+                # Note: Ensure your DB schema has this unique constraint
+                res = supabase.table("predictions").upsert(payload, on_conflict="timeframe,datetime,ticker").execute()
                 logger.info(f"💾 Saved to DB: {res.data}")
             else:
                 logger.warning("Supabase not configured, skipping save.")
@@ -386,6 +394,7 @@ async def get_predictions_with_prices(symbol: str, interval: str, limit: int = 1
         response = supabase.table("predictions")\
             .select("*")\
             .eq("timeframe", interval)\
+            .eq("ticker", symbol)\
             .order("datetime", desc=True)\
             .limit(limit)\
             .execute()
@@ -422,46 +431,36 @@ async def get_predictions_with_prices(symbol: str, interval: str, limit: int = 1
         # Fallback: Just return DB data without prices if parsing fails
         return db_predictions
 
-    # 3. Fetch Binance Data (Open Prices)
-    # We use the existing robust fetcher
-    klines = await fetch_binance_data(symbol, interval, start_time=start_ts, end_time=end_ts)
+    # 3. Identify missing prices and fetch range if needed
+    missing_prices = any(p.get('open_price') is None for p in db_predictions)
     
-    # Create a lookup dictionary: { timestamp_ms: open_price }
-    # Kline index 0 is Open Time, index 1 is Open Price
-    price_map = {item[0]: float(item[1]) for item in klines}
-
-    # 4. Merge Data
-    merged_results = []
-    for pred in db_predictions:
-        pred_time_str = pred['datetime']
+    if missing_prices:
+        logger.info(f"Filling missing prices for {symbol} {interval}...")
+        # 3a. Fetch Binance Data (Open Prices)
+        klines = await fetch_binance_data(symbol, interval, start_time=start_ts, end_time=end_ts)
         
-        # Convert DB time to ms to match lookup
-        try:
-            p_ts = int(datetime.strptime(pred_time_str, fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
-            
-            # Find matching price
-            # We look for exact match or nearest available candle
-            if p_ts in price_map:
-                pred['open_price'] = price_map[p_ts]
-                merged_results.append(pred)
-            else:
-                # Optional: Handle missing price (e.g., skip or leave as None)
-                # pred['open_price'] = None 
-                # merged_results.append(pred)
-                pass
-                
-        except Exception as e:
-            continue
+        # 3b. Create a lookup dictionary: { timestamp_ms: open_price }
+        price_map = {item[0]: float(item[1]) for item in klines}
 
-    return merged_results
+        # 3c. Merge Data
+        for pred in db_predictions:
+            if pred.get('open_price') is None:
+                try:
+                    p_ts = int(datetime.strptime(pred['datetime'], fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
+                    if p_ts in price_map:
+                        pred['open_price'] = price_map[p_ts]
+                except Exception:
+                    pass
+    
+    return db_predictions
 
 # --- New Endpoint ---
 
 @app.get("/api/predictions/with-price")
 async def get_enriched_predictions(
-    symbol: str = "BTCUSDT",  # Default to BTCUSDT as per your config
+    symbol: str = "BTCUSDT",
     interval: str = Query(..., regex="^(1m|3m|5m|15m|30m|1h|2h|4h|8h|12h|1d)$"),
-    limit: int = 100
+    limit: int = 5000
 ):
     """
     Returns predictions enriched with the Open price from Binance.
@@ -477,8 +476,3 @@ async def get_enriched_predictions(
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
-
